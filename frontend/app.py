@@ -8,165 +8,215 @@ import requests
 BACKEND_URL = "http://localhost:8000/api/v1/policy"
 
 # ==========================================
-# 法律合规与免责声明 (硬编码强制展示)
+# 顶层 UI 配置与全局免责
 # ==========================================
 st.set_page_config(page_title="中国政策报告智能分析系统", layout="wide")
-st.warning(
-    "⚠️ **合规免责声明**：本软件分析结果仅供参考，不构成任何决策建议，"
-    "政策解读以官方发布为准，开发者不对因使用本软件导致的任何决策损失承担责任。全流程不存储用户个人隐私数据。"
-)
-
-st.title("🏛️ 政策报告智能分析引擎 (Demo 版)")
-st.markdown("基于 CPython 多进程架构与 Transformer 语义向量的深度分析工具")
+st.warning("⚠️ **合规免责声明**：本软件分析结果仅供参考，决策请以官方发布稿为准。全流程不存储用户数据。")
+st.title("🏛️ 政策报告智能分析引擎 (Pro 最终修复版)")
 
 # ==========================================
-# 状态缓存：记录当前准备分析的文本 (硬核路线核心组件)
+# 状态缓存初始化 (解决内容消失与状态不协调的核心)
 # ==========================================
-if "current_report_text" not in st.session_state:
-    st.session_state.current_report_text = ""
+state_keys = {
+    "current_single_text": "",
+    "single_analysis_result": None,
+    "compare_analysis_result": None,
+    "compare_files_info": ("", "")
+}
+for key, value in state_keys.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
 
 # ==========================================
-# 侧边栏：数据输入模块
+# 通用工具函数 (资深开发规范：DRY原则)
 # ==========================================
-with st.sidebar:
-    st.header("1. 报告导入")
-    input_mode = st.radio("选择导入方式", ["使用内置 Demo 语料", "输入官方 URL", "手动上传文件"])
+def render_wordcloud(terms: list):
+    """封装词云渲染逻辑"""
+    try:
+        if not terms:
+            st.info("数据量不足，无法生成词云。")
+            return
+        word_freq = {str(word): max(1, 10 - i) for i, word in enumerate(terms)}
+        wc = WordCloud(width=800, height=400, background_color="white",
+                       font_path="simhei.ttf").generate_from_frequencies(word_freq)
+        fig, ax = plt.subplots()
+        ax.imshow(wc, interpolation='bilinear')
+        ax.axis("off")
+        st.pyplot(fig)
+    except Exception as err:
+        st.warning(f"词云渲染失败，请检查根目录 simhei.ttf。详情: {err}")
 
-    if input_mode == "使用内置 Demo 语料":
-        demo_text = """
-        深入推进教育强省建设。优化职业教育类型定位，扩大高质量专升本招生规模，畅通技能人才职业发展通道。
-        坚持把高质量充分就业作为经济社会发展的优先目标。强化宏观调控，培育新质生产力，加快建设现代化产业体系。
-        我们将持续深化科技体制改革，全面提升自主创新能力，扎实推进乡村全面振兴。
-        """
-        st.text_area("当前分析语料预览", value=demo_text, height=200, disabled=True)
-        # 将文本写入内存，等待主界面调用
-        st.session_state.current_report_text = demo_text
 
-    elif input_mode == "输入官方 URL":
-        url = st.text_input("输入目标网页链接 (例如广东省人民政府网)")
-        if st.button("合规抓取"):
-            # noinspection PyTypeChecker
-            with st.spinner("正在呼叫 FastAPI 后端，严格遵循 robots 协议抓取..."):
-                if not url:
-                    st.warning("请先输入链接！")
-                else:
-                    try:
-                        response = requests.post(f"{BACKEND_URL}/fetch", json={"url": url})
-                        if response.status_code == 200:
-                            res_data = response.json()["data"]
-                            st.success(f"真实抓取成功！获取文本总长度: {res_data['total_length']} 字")
-                            preview_text = "\n\n".join(res_data["preview"])
-                            st.text_area("真实抓取结果预览 (前3段)", value=preview_text, height=200)
-                            # 将抓取到的文本写入内存
-                            st.session_state.current_report_text = preview_text
-                        else:
-                            st.error(f"后端抓取报错了: {response.json().get('detail', '未知错误')}")
-                    except requests.exceptions.ConnectionError:
-                        st.error("无法连接到后端！请检查终端是否已经运行了 `uvicorn main:app ...`")
+def generate_markdown_report(data: dict, file_old: str, file_new: str) -> str:
+    """自动生成精美 Markdown 简报"""
+    md = f"# 🏛️ 政策变迁深度比对简报\n\n"
+    md += f"**基准文档**: {file_old}  \n**对比文档**: {file_new}\n\n---\n"
+    md += "## 📊 核心指标概览\n"
+    md += f"- **语义变动点**: {len(data.get('wording_changes', []))} 处\n"
+    md += f"- **新增核心词**: {len(data.get('new_terms', []))} 个\n"
+    md += f"- **缺失与弱化**: {len(data.get('missing_content', []))} 项\n\n---\n"
 
-    elif input_mode == "手动上传文件":
-        uploaded_file = st.file_uploader("支持 TXT 纯文本文件", type=['txt'])
-        if uploaded_file is not None:
-            if st.button("开始真实解析"):
+    md += "## 🔄 核心表述演变轨迹\n"
+    for change in data.get('wording_changes', []):
+        md += f"* **旧版**: {change.get('historical_match', '')}  \n"
+        md += f"  **新版**: {change.get('current', '')} (强度: {change.get('change_intensity', 0):.2f})\n\n"
+
+    md += "## ✨ 新增核心提法\n"
+    md += "> " + "、".join(data.get('new_terms', [])) + "\n\n"
+
+    md += "## 📉 动态删减与转向预警\n"
+    for m in data.get('missing_content', []):
+        md += f"- {m}\n"
+
+    md += "\n\n---\n*由 Policy-Analyzer-Pro 智能引擎生成*"
+    return md
+
+
+def display_analysis_results(data: dict, is_comparison=False):
+    """统一的分析结果可视化面板"""
+    if is_comparison:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("语义变动点", f"{len(data.get('wording_changes', []))} 处")
+        c2.metric("新增关键词", f"{len(data.get('new_terms', []))} 个")
+        c3.metric("弱化/删减项", f"{len(data.get('missing_content', []))} 项")
+        st.markdown("---")
+
+    t1, t2, t3, t4 = st.tabs(["📝 核心大纲", "🔍 措辞变化", "✨ 新提法/词云", "⚠️ 删减/弱化"])
+
+    with t1:
+        st.subheader("核心议题提取")
+        outline = data.get("priority_outline", [])
+        if outline:
+            for item in outline:
+                st.info(f"**权重: {item['weight']}** \n{item['content']}")
+        else:
+            st.write("未检测到显著议题。")
+
+    with t2:
+        st.subheader("表述演变细节")
+        changes = data.get("wording_changes", [])
+        if changes:
+            df = pd.DataFrame(changes)
+            st.dataframe(df, column_config={
+                "current": "本次/新稿表述",
+                "historical_match": "往年/旧稿匹配",
+                "change_intensity": st.column_config.ProgressColumn("语义偏移强度", min_value=0, max_value=1)
+            }, use_container_width=True)
+        else:
+            st.write("框架保持一致。")
+
+    with t3:
+        st.subheader("新增核心提法")
+        terms = data.get("new_terms", [])
+        if terms:
+            st.markdown(" ".join([f"`{t}`" for t in terms]))
+            render_wordcloud(terms)
+        else:
+            st.write("未发现显著新词。")
+
+    with t4:
+        st.subheader("内容转向监测")
+        missing = data.get("missing_content", [])
+        if missing:
+            # 根据真实算法输出调整颜色级别
+            if any("删减" in str(m) for m in missing):
+                st.error("❗ 监测到关键议题被移除或大幅弱化：")
+                for m in missing: st.markdown(f"* {m}")
+            else:
+                for m in missing: st.warning(f"📉 {m}")
+        else:
+            st.success("政策延续性良好。")
+
+
+# ==========================================
+# 顶层导航页签
+# ==========================================
+main_tabs = st.tabs(["🎯 单篇深度分析", "⚖️ 历届变迁对比"])
+
+# ==========================================
+# 功能一：单篇分析
+# ==========================================
+with main_tabs[0]:
+    st.subheader("数据导入")
+    mode = st.radio("导入方式", ["内置 Demo", "URL 抓取", "文件解析"], horizontal=True, key="s_mode")
+
+    col_in, col_ctrl = st.columns([3, 1])
+    with col_in:
+        if mode == "内置 Demo":
+            st.info("已准备好默认测试语料。")
+            if st.button("🚀 加载数据"):
+                st.session_state.current_single_text = "深入推进教育强省建设。优化职业教育，扩大高质量专升本招生规模。坚持把高质量充分就业作为经济社会发展的优先目标。培育新质生产力，加快建设现代化产业体系。"
+                st.success("加载成功！")
+        elif mode == "URL 抓取":
+            url = st.text_input("请输入官方报告网页链接")
+            if st.button("🚀 开始抓取"):
                 # noinspection PyTypeChecker
-                with st.spinner("正在将文件传输至 FastAPI 后端..."):
-                    try:
-                        files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
-                        response = requests.post(f"{BACKEND_URL}/upload", files=files)
-                        if response.status_code == 200:
-                            res_data = response.json()["data"]
-                            st.success(f"真实解析成功！有效文本长度: {res_data['text_length']} 字")
-                            # 从前台直接解码文件，写入全局内存
-                            file_content = uploaded_file.getvalue().decode('utf-8', errors='ignore')
-                            st.session_state.current_report_text = file_content
-                        else:
-                            st.error(f"解析报错: {response.json().get('detail', '未知错误')}")
-                    except requests.exceptions.ConnectionError:
-                        st.error("无法连接到后端！请检查 uvicorn 是否运行。")
+                with st.spinner("网络抓取中..."):
+                    res = requests.post(f"{BACKEND_URL}/fetch", json={"url": url})
+                    if res.status_code == 200:
+                        st.session_state.current_single_text = res.json()["data"]["text"]
+                        st.success("抓取并预处理完成！")
+        elif mode == "文件解析":
+            up = st.file_uploader("支持 PDF/DOCX/TXT", type=['pdf', 'docx', 'txt'], key="s_up")
+            if up and st.button("🚀 开始解析"):
+                # noinspection PyTypeChecker
+                with st.spinner("正在提取文本..."):
+                    files = {"file": (up.name, up.getvalue())}
+                    res = requests.post(f"{BACKEND_URL}/upload", files=files)
+                    if res.status_code == 200:
+                        st.session_state.current_single_text = res.json()["data"]["text"]
+                        st.success("解析成功！")
 
-# ==========================================
-# 主界面：真实 AI 分析引擎接入
-# ==========================================
-if st.button("🚀 启动深度核心分析", type="primary"):
+    with col_ctrl:
+        if st.button("🧹 重置分析结果", use_container_width=True):
+            st.session_state.single_analysis_result = None
+            st.rerun()
 
-    # 检查内存里有没有真实拿到的文本
-    if not st.session_state.current_report_text:
-        st.warning("请先在左侧选择导入方式，并成功获取文本（如点击“开始真实解析”）！")
-    else:
-        # noinspection PyTypeChecker
-        with st.spinner("正在唤醒 CPython 多进程计算池，首次运行需自动下载 400MB 语言模型，请耐心等待..."):
-            try:
-                # 构造一份假的历史基线语料，用于对照组测试
-                fake_history = [
-                    "大力发展高新技术产业。",
-                    "稳步推进专插本招录工作。",
-                    "往年重点提到了传统基建投资增速，以及能耗双控指标的严格落实。"
-                ]
-
-                # 向后端发射真实的 AI 推理请求！
-                response = requests.post(
-                    f"{BACKEND_URL}/analyze",
-                    json={
-                        "current_text": st.session_state.current_report_text,
-                        "history_texts": fake_history
-                    }
-                )
-
+    st.markdown("---")
+    if st.button("🔥 启动 AI 核心分析引擎", type="primary", use_container_width=True):
+        if st.session_state.current_single_text:
+            # noinspection PyTypeChecker
+            with st.spinner("多进程子进程正在进行张量计算..."):
+                response = requests.post(f"{BACKEND_URL}/analyze",
+                                         json={"current_text": st.session_state.current_single_text})
                 if response.status_code == 200:
-                    # 拿到后端的真实 AI 运算结果！
-                    real_response = response.json()["data"]
+                    st.session_state.single_analysis_result = response.json()["data"]
+        else:
+            st.warning("请先加载数据！")
 
-                    tab1, tab2, tab3, tab4 = st.tabs(
-                        ["📝 排序优先级与大纲", "🔍 措辞变化分析", "✨ 新提法与词云", "⚠️ 缺失内容预警"])
+    if st.session_state.single_analysis_result:
+        display_analysis_results(st.session_state.single_analysis_result)
 
-                    with tab1:
-                        st.subheader("高权重核心段落提取")
-                        for item in real_response.get("priority_outline", []):
-                            st.info(f"**权重值: {item['weight']}** \n{item['content']}")
+# ==========================================
+# 功能二：双篇对比 (含导出)
+# ==========================================
+with main_tabs[1]:
+    st.subheader("变迁比对控制台")
+    c_o, c_n = st.columns(2)
+    with c_o:
+        f_o = st.file_uploader("📂 基准文档 (往年/旧稿)", type=['pdf', 'docx', 'txt'], key="c_o")
+    with c_n:  # 【关键修复】：这里已修改为正确的 c_n
+        f_n = st.file_uploader("📂 对比文档 (今年/新稿)", type=['pdf', 'docx', 'txt'], key="c_n")
 
-                    with tab2:
-                        st.subheader("历届政策表述变化强度测算")
-                        changes = real_response.get("wording_changes", [])
-                        if changes:
-                            df_changes = pd.DataFrame(changes)
-                            st.dataframe(df_changes, column_config={
-                                "current": "本次报告表述",
-                                "historical_match": "历史相似表述",
-                                "change_intensity": st.column_config.ProgressColumn("变化强度", format="%f",
-                                                                                    min_value=0, max_value=1)
-                            }, use_container_width=True)
-                        else:
-                            st.write("未检测到明显的表述微调。")
+    if f_o and f_n:
+        if st.button("⚖️ 启动双篇深度对比", type="primary", use_container_width=True):
+            # noinspection PyTypeChecker
+            with st.spinner("正在执行 TextRank 关键词密度比对..."):
+                try:
+                    files = {"file_old": (f_o.name, f_o.getvalue()), "file_new": (f_n.name, f_n.getvalue())}
+                    res = requests.post(f"{BACKEND_URL}/compare", files=files)
+                    if res.status_code == 200:
+                        st.session_state.compare_analysis_result = res.json()["data"]["analysis"]
+                        st.session_state.compare_files_info = (f_o.name, f_n.name)
+                except Exception as e:
+                    st.error(f"分析失败: {e}")
 
-                    with tab3:
-                        st.subheader("首次提出核心词汇")
-                        new_terms = real_response.get("new_terms", [])
-                        if new_terms:
-                            st.markdown(" ".join([f"`{term}`" for term in new_terms]))
+    if st.session_state.compare_analysis_result:
+        display_analysis_results(st.session_state.compare_analysis_result, is_comparison=True)
 
-                            st.subheader("政策热点词云")
-                            word_freq = {str(word): max(1, 10 - i) for i, word in enumerate(new_terms)}
-                            if word_freq:
-                                wc = WordCloud(width=800, height=400, background_color="white",
-                                               font_path="simhei.ttf").generate_from_frequencies(word_freq)
-                                fig, ax = plt.subplots()
-                                ax.imshow(wc, interpolation='bilinear')
-                                ax.axis("off")
-                                st.pyplot(fig)
-                        else:
-                            st.write("未提取到显著的新提法。")
-
-                    with tab4:
-                        st.subheader("潜在政策转向提示")
-                        missing_content = real_response.get("missing_content", [])
-                        if missing_content:
-                            st.write("对比往年基线，以下重点内容本次未提及：")
-                            for missing in missing_content:
-                                st.error(f"📉 {missing}")
-                        else:
-                            st.success("核心框架保持稳定，无明显缺失。")
-
-                else:
-                    st.error(f"AI 推理报错了: {response.json().get('detail', '未知错误')}")
-            except requests.exceptions.ConnectionError:
-                st.error("无法连接到后端！请检查 uvicorn 是否运行。")
+        st.markdown("### 📥 成果导出")
+        report = generate_markdown_report(st.session_state.compare_analysis_result,
+                                          st.session_state.compare_files_info[0],
+                                          st.session_state.compare_files_info[1])
+        st.download_button("📄 下载政策对比深度简报 (.md)", data=report, file_name="Report.md", type="primary")
